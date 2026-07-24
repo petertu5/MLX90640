@@ -12,12 +12,20 @@
         #canvas-container { display: flex; justify-content: center; margin-top: 10px; }
         canvas { border: 3px solid #333; background: #000; width: 100%; max-width: 480px; height: auto; border-radius: 8px; box-shadow: 0 10px 20px rgba(0,0,0,0.3); }
         #status { color: #aaa; font-size: 14px; margin-bottom: 5px; }
-        #info-panel { 
-          font-size: 32px; 
-          margin-bottom: 25px; 
-          font-weight: 500; 
-          color: #ffc107; 
-          font-family: monospace;
+#info-panel { 
+    margin-bottom: 25px; 
+    font-family: 'Segoe UI', Arial, sans-serif;
+    line-height: 1.5; /* 調整上下兩列的行距 */
+}
+#max-temp {
+    font-size: 32px;    /* 放大 2 倍 */
+    font-weight: bold;
+    color: #ff4d4d;     /* 亮紅色 */
+}
+#min-temp {
+    font-size: 32px;    /* 放大 2 倍 */
+    font-weight: bold;
+    color: #2ecc71;     /* 亮綠色 */
         }
     </style>
 </head>
@@ -25,7 +33,10 @@
 
     <h2>MLX90640 熱成像觀測站</h2>
     <div id="status">狀態: 未連線</div>
-    <div id="info-panel">最高溫: -- °C | 最低溫: -- °C</div>
+    <div id="info-panel">
+        <div id="max-temp">最高溫: -- °C</div>
+        <div id="min-temp">最低溫: -- °C</div>
+    </div>
     <button id="connectBtn">連接 ESP32 藍牙</button>
     
     <div id="canvas-container">
