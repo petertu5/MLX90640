@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ESP32-C3 熱成像儀</title>
+    <style>
+        body { font-family: Arial, sans-serif; text-align: center; background: #222; color: #fff; margin: 0; padding: 20px; }
+        button { padding: 12px 24px; font-size: 16px; font-weight: bold; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; margin-bottom: 20px; }
+        button:active { background: #0056b3; }
+        #canvas-container { display: flex; justify-content: center; margin-top: 10px; }
+        canvas { border: 2px solid #555; background: #000; width: 100%; max-width: 480px; height: auto; image-rendering: pixelated; }
+        #status { color: #aaa; font-size: 14px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <h2>MLX90640 熱成像觀測站</h2>
+    <div id="status">狀態: 未連線</div>
+    <button id="connectBtn">連接 ESP32 藍牙</button>
+    
+    <div id="canvas-container">
+        <!-- MLX90640 是 32x24 像素 -->
+        <canvas id="thermalCanvas" width="32" height="24"></canvas>
+    </div>
+
+    <script>
+        const SERVICE_UUID = "12345678-1234-5678-1234-567812345678";
+        const CHARACTERISTIC_UUID = "87654321-4321-4321-4321-210987654321";
+
+        const connectBtn = document.getElementById('connectBtn');
+        const statusDiv = document.getElementById('status');
+        const canvas = document.getElementById('thermalCanvas');
+        const ctx = canvas.getContext('2d');
+
+        let rawBuffer = new Uint8Array(1536); // 用來存放 768 * 2 位元組的總框架
+        let bytesCollected = 0;
+
+        connectBtn.addEventListener('click', async () => {
+            try {
+                statusDiv.innerText = "正在尋找裝置...";
+                // 1. 請求藍牙裝置
+                const device = await navigator.bluetooth.requestDevice({
+                    filters: [{ name: 'ESP32C3_Thermal' }],
+                    optionalServices: [SERVICE_UUID]
+                });
+
+                statusDiv.innerText = "連接中...";
+                const server = await device.gatt.connect();
+                const service = await server.getPrimaryService(SERVICE_UUID);
+                const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
+
+                // 2. 監聽 Notify 數據流
+                await characteristic.startNotifications();
+                characteristic.addEventListener('characteristicvaluechanged', handleData);
+                
+                statusDiv.innerText = "連線成功！正在接收數據...";
+                connectBtn.style.display = 'none';
+            } catch (error) {
+                console.error(error);
+                statusDiv.innerText = "連線失敗: " + error.message;
+            }
+        });
+
+        // 3. 處理接收到的分包
+        function handleData(event) {
+            const chunk = new Uint8Array(event.target.value.buffer);
+            if (chunk.length < 2) return;
+
+            const packetIdx = chunk[0];
+            const isLastPacket = chunk[1];
+            const payload = chunk.subarray(2);
+
+            // 防呆：如果是第一包，重設指針
+            if (packetIdx === 0) {
+                bytesCollected = 0;
+            }
+
+            // 將資料塞入總緩衝區
+            rawBuffer.set(payload, bytesCollected);
+            bytesCollected += payload.length;
+
+            // 4. 收到最後一包，開始還原並繪圖
+            if (isLastPacket === 1 && bytesCollected >= 1536) {
+                renderThermalImage(rawBuffer);
+                bytesCollected = 0; // 清空等下一影格
+            }
+        }
+
+        // 5. 還原溫度並渲染至 Canvas
+        function renderThermalImage(buffer) {
+            const dataView = new DataView(buffer.buffer);
+            const temperatures = new Float32Array(768);
+
+            let minT = 100;
+            let maxT = 0;
+
+            // 還原 int16_t -> float，並找出當前畫面的極端值（自動對比度）
+            for (let i = 0; i < 768; i++) {
+                const rawVal = dataView.getInt16(i * 2, true); // 小端序 (Little Endian)
+                temperatures[i] = rawVal / 10.0;
+                if (temperatures[i] < minT) minT = temperatures[i];
+                if (temperatures[i] > maxT) maxT = temperatures[i];
+            }
+
+            // 建立 Canvas 像素點
+            const imgData = ctx.createImageData(32, 24);
+            
+            for (let i = 0; i < 768; i++) {
+                const t = temperatures[i];
+                // 正規化溫度到 0.0 ~ 1.0 之間
+                const norm = (maxT === minT) ? 0 : (t - minT) / (maxT - minT);
+                const rgb = jetColorMap(norm);
+
+                const pixelIdx = i * 4;
+                imgData.data[pixelIdx] = rgb[0];     // R
+                imgData.data[pixelIdx + 1] = rgb[1]; // G
+                imgData.data[pixelIdx + 2] = rgb[2]; // B
+                imgData.data[pixelIdx + 3] = 255;    // Alpha 不透明度
+            }
+
+            ctx.putImageData(imgData, 0, 0);
+        }
+
+        // 6. 經典 Jet 彩虹色標演算法
+        function jetColorMap(v) {
+            const r = Math.clamp(Math.min(4 * v - 1.5, -4 * v + 4.5), 0, 1) * 255;
+            const g = Math.clamp(Math.min(4 * v - 0.5, -4 * v + 3.5), 0, 1) * 255;
+            const b = Math.clamp(Math.min(4 * v + 0.5, -4 * v + 2.5), 0, 1) * 255;
+            return [Math.floor(r), Math.floor(g), Math.floor(b)];
+        }
+
+        // 輔助函式：限制數值邊界
+        Math.clamp = function(value, min, max) {
+            return Math.min(Math.max(value, min), max);
+        };
+    </script>
+</body>
+</html>
