@@ -3,25 +3,28 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ESP32-C3 熱成像儀</title>
+    <title>ESP32-C3 高解析熱成像儀</title>
     <style>
-        body { font-family: Arial, sans-serif; text-align: center; background: #222; color: #fff; margin: 0; padding: 20px; }
-        button { padding: 12px 24px; font-size: 16px; font-weight: bold; background: #007bff; color: white; border: none; border-radius: 5px; cursor: pointer; margin-bottom: 20px; }
+        body { font-family: 'Segoe UI', Arial, sans-serif; text-align: center; background: #1a1a1a; color: #fff; margin: 0; padding: 20px; }
+        button { padding: 14px 28px; font-size: 16px; font-weight: bold; background: #007bff; color: white; border: none; border-radius: 8px; cursor: pointer; margin-bottom: 20px; transition: background 0.2s; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        button:hover { background: #0069d9; }
         button:active { background: #0056b3; }
         #canvas-container { display: flex; justify-content: center; margin-top: 10px; }
-        canvas { border: 2px solid #555; background: #000; width: 100%; max-width: 480px; height: auto; image-rendering: pixelated; }
-        #status { color: #aaa; font-size: 14px; margin-bottom: 10px; }
+        canvas { border: 3px solid #333; background: #000; width: 100%; max-width: 480px; height: auto; border-radius: 8px; box-shadow: 0 10px 20px rgba(0,0,0,0.3); }
+        #status { color: #aaa; font-size: 14px; margin-bottom: 5px; }
+        #info-panel { font-size: 16px; margin-bottom: 15px; font-weight: 500; color: #ffc107; }
     </style>
 </head>
 <body>
 
-    <h2>MLX90640 熱成像觀測站</h2>
+    <h2>MLX90640 平滑熱成像觀測站</h2>
     <div id="status">狀態: 未連線</div>
+    <div id="info-panel">最高溫: -- °C | 最低溫: -- °C</div>
     <button id="connectBtn">連接 ESP32 藍牙</button>
     
     <div id="canvas-container">
-        <!-- MLX90640 是 32x24 像素 -->
-        <canvas id="thermalCanvas" width="32" height="24"></canvas>
+        <!-- 畫布放大 10 倍至 320x240，用於呈現雙線性內插後的平滑畫面 -->
+        <canvas id="thermalCanvas" width="320" height="240"></canvas>
     </div>
 
     <script>
@@ -30,16 +33,16 @@
 
         const connectBtn = document.getElementById('connectBtn');
         const statusDiv = document.getElementById('status');
+        const infoPanel = document.getElementById('info-panel');
         const canvas = document.getElementById('thermalCanvas');
         const ctx = canvas.getContext('2d');
 
-        let rawBuffer = new Uint8Array(1536); // 用來存放 768 * 2 位元組的總框架
+        let rawBuffer = new Uint8Array(1536); 
         let bytesCollected = 0;
 
         connectBtn.addEventListener('click', async () => {
             try {
                 statusDiv.innerText = "正在尋找裝置...";
-                // 1. 請求藍牙裝置
                 const device = await navigator.bluetooth.requestDevice({
                     filters: [{ name: 'ESP32C3_Thermal' }],
                     optionalServices: [SERVICE_UUID]
@@ -50,11 +53,10 @@
                 const service = await server.getPrimaryService(SERVICE_UUID);
                 const characteristic = await service.getCharacteristic(CHARACTERISTIC_UUID);
 
-                // 2. 監聽 Notify 數據流
                 await characteristic.startNotifications();
                 characteristic.addEventListener('characteristicvaluechanged', handleData);
                 
-                statusDiv.innerText = "連線成功！正在接收數據...";
+                statusDiv.innerText = "連線成功！即時影像傳輸中...";
                 connectBtn.style.display = 'none';
             } catch (error) {
                 console.error(error);
@@ -62,7 +64,6 @@
             }
         });
 
-        // 3. 處理接收到的分包
         function handleData(event) {
             const chunk = new Uint8Array(event.target.value.buffer);
             if (chunk.length < 2) return;
@@ -71,58 +72,85 @@
             const isLastPacket = chunk[1];
             const payload = chunk.subarray(2);
 
-            // 防呆：如果是第一包，重設指針
             if (packetIdx === 0) {
                 bytesCollected = 0;
             }
 
-            // 將資料塞入總緩衝區
             rawBuffer.set(payload, bytesCollected);
             bytesCollected += payload.length;
 
-            // 4. 收到最後一包，開始還原並繪圖
             if (isLastPacket === 1 && bytesCollected >= 1536) {
                 renderThermalImage(rawBuffer);
-                bytesCollected = 0; // 清空等下一影格
+                bytesCollected = 0; 
             }
         }
 
-        // 5. 還原溫度並渲染至 Canvas
         function renderThermalImage(buffer) {
             const dataView = new DataView(buffer.buffer);
-            const temperatures = new Float32Array(768);
+            const srcW = 32;
+            const srcH = 24;
+            const srcGrid = new Float32Array(srcW * srcH);
 
             let minT = 100;
             let maxT = 0;
 
-            // 還原 int16_t -> float，並找出當前畫面的極端值（自動對比度）
+            // 1. 還原溫度，並找出極值
             for (let i = 0; i < 768; i++) {
-                const rawVal = dataView.getInt16(i * 2, true); // 小端序 (Little Endian)
-                temperatures[i] = rawVal / 10.0;
-                if (temperatures[i] < minT) minT = temperatures[i];
-                if (temperatures[i] > maxT) maxT = temperatures[i];
+                const rawVal = dataView.getInt16(i * 2, true); 
+                srcGrid[i] = rawVal / 10.0;
+                if (srcGrid[i] < minT) minT = srcGrid[i];
+                if (srcGrid[i] > maxT) maxT = srcGrid[i];
             }
 
-            // 建立 Canvas 像素點
-            const imgData = ctx.createImageData(32, 24);
-            
-            for (let i = 0; i < 768; i++) {
-                const t = temperatures[i];
-                // 正規化溫度到 0.0 ~ 1.0 之間
-                const norm = (maxT === minT) ? 0 : (t - minT) / (maxT - minT);
-                const rgb = jetColorMap(norm);
+            // 更新網頁上的文字資訊面板
+            infoPanel.innerText = `最高溫: ${maxT.toFixed(1)} °C | 最低溫: ${minT.toFixed(1)} °C`;
 
-                const pixelIdx = i * 4;
-                imgData.data[pixelIdx] = rgb[0];     // R
-                imgData.data[pixelIdx + 1] = rgb[1]; // G
-                imgData.data[pixelIdx + 2] = rgb[2]; // B
-                imgData.data[pixelIdx + 3] = 255;    // Alpha 不透明度
+            // 2. 建立放大目標 (320x240) 的 Canvas 影像資料
+            const dstW = 320;
+            const dstH = 240;
+            const imgData = ctx.createImageData(dstW, dstH);
+
+            // 3. 雙線性內插法（Bilinear Interpolation）核心演算
+            for (let dstY = 0; dstY < dstH; dstY++) {
+                // 對應到原始 32x24 的浮點數座標
+                const srcY = (dstY / (dstH - 1)) * (srcH - 1);
+                const y0 = Math.floor(srcY);
+                const y1 = Math.min(y0 + 1, srcH - 1);
+                const t = srcY - y0; // Y 方向的權重比例
+
+                for (let dstX = 0; dstX < dstW; dstX++) {
+                    const srcX = (dstX / (dstW - 1)) * (srcW - 1);
+                    const x0 = Math.floor(srcX);
+                    const x1 = Math.min(x0 + 1, srcW - 1);
+                    const u = srcX - x0; // X 方向的權重比例
+
+                    // 取得原始鄰近 4 個像素點的溫度值
+                    const p00 = srcGrid[y0 * srcW + x0]; // 左上
+                    const p10 = srcGrid[y0 * srcW + x1]; // 右上
+                    const p01 = srcGrid[y1 * srcW + x0]; // 左下
+                    const p11 = srcGrid[y1 * srcW + x1]; // 右下
+
+                    // 雙線性混色公式計算出該點溫度
+                    const interpolatedTemp = (1 - t) * ((1 - u) * p00 + u * p10) + t * ((1 - u) * p01 + u * p11);
+
+                    // 將計算出的溫度歸一化 (0.0 ~ 1.0)，並轉換為彩虹色
+                    const norm = (maxT === minT) ? 0 : (interpolatedTemp - minT) / (maxT - minT);
+                    const rgb = jetColorMap(norm);
+
+                    // 寫入目標畫布的像素陣列
+                    const pixelIdx = (dstY * dstW + dstX) * 4;
+                    imgData.data[pixelIdx] = rgb[0];     // R
+                    imgData.data[pixelIdx + 1] = rgb[1]; // G
+                    imgData.data[pixelIdx + 2] = rgb[2]; // B
+                    imgData.data[pixelIdx + 3] = 255;    // A (不透明)
+                }
             }
 
+            // 4. 將渲染好的平滑畫面畫到畫布上
             ctx.putImageData(imgData, 0, 0);
         }
 
-        // 6. 經典 Jet 彩虹色標演算法
+        // 經典 Jet 彩虹色標演算法
         function jetColorMap(v) {
             const r = Math.clamp(Math.min(4 * v - 1.5, -4 * v + 4.5), 0, 1) * 255;
             const g = Math.clamp(Math.min(4 * v - 0.5, -4 * v + 3.5), 0, 1) * 255;
@@ -130,7 +158,6 @@
             return [Math.floor(r), Math.floor(g), Math.floor(b)];
         }
 
-        // 輔助函式：限制數值邊界
         Math.clamp = function(value, min, max) {
             return Math.min(Math.max(value, min), max);
         };
